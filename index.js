@@ -425,12 +425,9 @@ app.post('/api/convert/compress', upload.single('file'), async (req, res) => {
   }
 });
 
-// Catch-all for production
-if (process.env.NODE_ENV === 'production') {
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../client/dist/index.html'));
-  });
-}
+app.get('/', (req, res) => {
+  res.status(200).send('FileFlow Backend is awake and running!');
+});
 
 // Error handling middleware
 app.use((err, req, res, next) => {
