@@ -7,6 +7,8 @@ import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
 import sharp from 'sharp';
 import { PDFDocument } from 'pdf-lib';
+import os from 'os';
+import { convertFile, allowedTargets, normalizeExt, UserError, DOCUMENT_INPUTS, ARCHIVE_INPUTS } from './convert.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,8 +35,9 @@ const storage = multer.diskStorage({
     cb(null, uploadDir);
   },
   filename: (req, file, cb) => {
-    const uniqueName = `${uuidv4()}-${file.originalname}`;
-    cb(null, uniqueName);
+    // Never use the client's file name on disk (it could contain "../")
+    const ext = getExtension(file.originalname).replace(/[^a-z0-9]/g, '').slice(0, 8);
+    cb(null, `${uuidv4()}${ext ? '.' + ext : ''}`);
   }
 });
 
@@ -45,10 +48,11 @@ const upload = multer({
 
 // Supported formats
 const IMAGE_FORMATS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'svg', 'ico', 'avif'];
-const DOCUMENT_FORMATS = ['pdf', 'docx', 'txt', 'md', 'html'];
-const ARCHIVE_FORMATS = ['zip', 'tar', 'gz'];
-const VIDEO_FORMATS = ['mp4', 'webm', 'avi', 'mov'];
-const AUDIO_FORMATS = ['mp3', 'wav', 'ogg', 'flac'];
+const DOCUMENT_FORMATS = DOCUMENT_INPUTS;
+const ARCHIVE_FORMATS = ARCHIVE_INPUTS;
+// Video and audio are converted in the browser (ffmpeg.wasm), not on this server.
+const VIDEO_FORMATS = ['mp4', 'webm', 'avi', 'mov', 'mkv', 'm4v', 'flv', 'wmv', 'ogv'];
+const AUDIO_FORMATS = ['mp3', 'wav', 'ogg', 'flac', 'm4a', 'aac', 'opus', 'wma', 'aiff', 'ac3'];
 
 // Get file extension
 function getExtension(filename) {
@@ -84,6 +88,11 @@ app.get('/api/formats', (req, res) => {
   });
 });
 
+// Which targets a given input extension can be converted to, e.g. /api/targets?from=pdf
+app.get('/api/targets', (req, res) => {
+  res.json({ from: normalizeExt(req.query.from), targets: allowedTargets(req.query.from) });
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -106,8 +115,16 @@ app.post('/api/convert/image', upload.single('file'), async (req, res) => {
     const outputFileName = `${getBaseName(req.file.originalname)}.${targetFormat}`;
     const outputPath = path.join(__dirname, 'uploads', `${uuidv4()}-${outputFileName}`);
 
-    // Handle SVG separately (sharp doesn't support SVG output)
-    if (targetFormat === 'svg') {
+    if (targetFormat === 'pdf') {
+      // Image to PDF: one page, sized to the image
+      const png = await sharp(inputPath).rotate().png().toBuffer();
+      const pdfDoc = await PDFDocument.create();
+      const image = await pdfDoc.embedPng(png);
+      const page = pdfDoc.addPage([image.width, image.height]);
+      page.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
+      fs.writeFileSync(outputPath, await pdfDoc.save());
+    } else if (targetFormat === 'svg') {
+      // Handle SVG separately (sharp doesn't support SVG output)
       // Just copy the file if it's already SVG
       if (getExtension(req.file.originalname) === 'svg') {
         fs.copyFileSync(inputPath, outputPath);
@@ -174,7 +191,7 @@ app.post('/api/convert/image', upload.single('file'), async (req, res) => {
     if (req.file) {
       cleanupFile(req.file.path);
     }
-    res.status(500).json({ error: 'Conversion failed', details: error.message });
+    res.status(500).json({ error: 'Conversion failed. The image may be damaged or in an unsupported format.' });
   }
 });
 
@@ -250,92 +267,85 @@ app.get('/api/image/info', upload.single('file'), async (req, res) => {
   }
 });
 
-// Generic file conversion endpoint (for documents)
+// Generic file conversion endpoint (documents, spreadsheets, slides, archives)
+const WORK_ROOT = path.join(os.tmpdir(), 'fileflow-jobs');
+fs.mkdirSync(WORK_ROOT, { recursive: true });
+
+function safeBaseName(filename) {
+  const base = getBaseName(path.basename(filename || 'file'))
+    .replace(/[^\p{L}\p{N} ._()-]/gu, '_')
+    .replace(/^[.\s]+/, '')
+    .slice(0, 100);
+  return base || 'file';
+}
+
 app.post('/api/convert/file', upload.single('file'), async (req, res) => {
+  let work;
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const targetFormat = req.body.format?.toLowerCase();
+    const targetFormat = normalizeExt(req.body.format);
     if (!targetFormat) {
       cleanupFile(req.file.path);
       return res.status(400).json({ error: 'Target format not specified' });
     }
 
-    const inputExt = getExtension(req.file.originalname);
-    const inputPath = req.file.path;
-    const outputFileName = `${getBaseName(req.file.originalname)}.${targetFormat}`;
-    const outputPath = path.join(__dirname, 'uploads', `${uuidv4()}-${outputFileName}`);
+    // .tar.gz files show up as "gz"; treat them as tgz
+    let inputExt = normalizeExt(getExtension(req.file.originalname));
+    if (/\.tar\.gz$/i.test(req.file.originalname)) inputExt = 'tgz';
 
-    // Document conversions
-    if (DOCUMENT_FORMATS.includes(inputExt) && DOCUMENT_FORMATS.includes(targetFormat)) {
-      const content = fs.readFileSync(inputPath, 'utf-8');
-      
-      if (targetFormat === 'txt') {
-        // Strip markdown/HTML for plain text
-        let text = content
-          .replace(/#{1,6}\s/g, '')
-          .replace(/\*\*/g, '')
-          .replace(/\*/g, '')
-          .replace(/`/g, '')
-          .replace(/<[^>]*>/g, '');
-        fs.writeFileSync(outputPath, text);
-      } else if (targetFormat === 'md') {
-        if (inputExt === 'html') {
-          // Simple HTML to Markdown conversion
-          let md = content
-            .replace(/<h1[^>]*>(.*?)<\/h1>/gi, '# $1\n')
-            .replace(/<h2[^>]*>(.*?)<\/h2>/gi, '## $1\n')
-            .replace(/<h3[^>]*>(.*?)<\/h3>/gi, '### $1\n')
-            .replace(/<p[^>]*>(.*?)<\/p>/gi, '$1\n\n')
-            .replace(/<br\s*\/?>/gi, '\n')
-            .replace(/<[^>]*>/g, '');
-          fs.writeFileSync(outputPath, md);
-        } else {
-          fs.copyFileSync(inputPath, outputPath);
-        }
-      } else if (targetFormat === 'html') {
-        if (inputExt === 'md') {
-          // Simple Markdown to HTML conversion
-          let html = content
-            .replace(/^#{3}\s(.+)$/gm, '<h3>$1</h3>')
-            .replace(/^#{2}\s(.+)$/gm, '<h2>$1</h2>')
-            .replace(/^#\s(.+)$/gm, '<h1>$1</h1>')
-            .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-            .replace(/\*(.+?)\*/g, '<em>$1</em>')
-            .replace(/\n\n/g, '</p><p>');
-          html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Converted</title></head><body><p>${html}</p></body></html>`;
-          fs.writeFileSync(outputPath, html);
-        } else {
-          fs.copyFileSync(inputPath, outputPath);
-        }
-      } else {
-        // For PDF and DOCX, we just return the original with a note
-        fs.copyFileSync(inputPath, outputPath);
-      }
-    } else {
-      // For unsupported conversions, just copy the file
-      fs.copyFileSync(inputPath, outputPath);
-    }
-
-    cleanupFile(inputPath);
-
-    res.download(outputPath, outputFileName, (err) => {
-      cleanupFile(outputPath);
-      if (err) {
-        console.error('Download error:', err);
-      }
-    });
-
-  } catch (error) {
-    console.error('Conversion error:', error);
-    if (req.file) {
+    // Put the upload in its own folder with a clean, readable name
+    work = fs.mkdtempSync(path.join(WORK_ROOT, 'job-'));
+    fs.mkdirSync(path.join(work, 'in'));
+    const baseName = safeBaseName(req.file.originalname.replace(/\.tar\.gz$/i, '.tgz'));
+    const inputPath = path.join(work, 'in', `${baseName}.${inputExt || 'bin'}`);
+    try {
+      fs.renameSync(req.file.path, inputPath);
+    } catch (e) {
+      if (e.code !== 'EXDEV') throw e;
+      fs.copyFileSync(req.file.path, inputPath);
       cleanupFile(req.file.path);
     }
-    res.status(500).json({ error: 'Conversion failed', details: error.message });
+
+    const started = Date.now();
+    const result = await convertFile(inputPath, inputExt, targetFormat, work);
+    console.log(`Converted ${inputExt} -> ${targetFormat} in ${Date.now() - started}ms`);
+
+    const jobDir = work;
+    work = undefined; // cleaned up after the download finishes
+    res.download(result.path, result.filename, (err) => {
+      fs.rm(jobDir, { recursive: true, force: true }, () => {});
+      if (err) console.error('Download error:', err);
+    });
+  } catch (error) {
+    if (req.file) cleanupFile(req.file.path);
+    if (work) fs.rm(work, { recursive: true, force: true }, () => {});
+    if (error instanceof UserError) {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('Conversion error:', error);
+    res.status(500).json({ error: 'Conversion failed. Please try again, or contact support if it keeps happening.' });
   }
 });
+
+// Remove any job folders left behind (e.g. after a crash) once they are an hour old
+setInterval(() => {
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  for (const dir of [WORK_ROOT, path.join(__dirname, 'uploads')]) {
+    fs.readdir(dir, (err, names) => {
+      if (err) return;
+      for (const name of names) {
+        if (name === '.gitkeep') continue;
+        const p = path.join(dir, name);
+        fs.stat(p, (e, st) => {
+          if (!e && st.mtimeMs < cutoff) fs.rm(p, { recursive: true, force: true }, () => {});
+        });
+      }
+    });
+  }
+}, 15 * 60 * 1000).unref();
 
 // PDF operations
 app.post('/api/pdf/info', upload.single('file'), async (req, res) => {

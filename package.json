@@ -1,27 +1,27 @@
 {
-  "name": "file-converter",
-  "version": "1.0.0",
-  "description": "Online File Converter - Convert any file type to any file type",
+  "name": "fileflow-backend",
+  "version": "2.0.0",
+  "description": "FileFlow conversion API (images, documents, spreadsheets, slides, archives)",
   "type": "module",
+  "main": "index.js",
   "scripts": {
-    "dev": "concurrently \"npm run server\" \"npm run client\"",
-    "server": "node server/index.js",
-    "client": "npm run dev --prefix client",
-    "build": "npm run build --prefix client",
-    "start": "NODE_ENV=production node server/index.js",
-    "deploy": "npm run build && npm run start"
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.18.2",
-    "multer": "^1.4.5-lts.1",
-    "sharp": "^0.33.2",
-    "pdf-lib": "^1.17.1",
+    "html-to-text": "^9.0.5",
     "jszip": "^3.10.1",
-    "docx": "^8.5.0",
+    "mammoth": "^1.8.0",
+    "marked": "^12.0.2",
+    "multer": "^1.4.5-lts.1",
+    "pdf-lib": "^1.17.1",
+    "sharp": "^0.33.2",
+    "turndown": "^7.2.0",
+    "turndown-plugin-gfm": "^1.0.2",
     "uuid": "^9.0.1"
-  },
-  "devDependencies": {
-    "concurrently": "^8.2.2"
   }
 }
