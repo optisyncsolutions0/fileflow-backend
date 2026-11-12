@@ -53,7 +53,7 @@ export function allowedTargets(ext) {
 
 // ---------- process helpers ----------
 
-function run(cmd, args, opts = {}) {
+export function run(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { timeout: TOOL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024, ...opts }, (err, stdout, stderr) => {
       if (!err) return resolve(stdout);
@@ -66,7 +66,7 @@ function run(cmd, args, opts = {}) {
   });
 }
 
-const py = (...args) => run(PYTHON, [PY_TOOL, ...args]);
+export const py = (...args) => run(PYTHON, [PY_TOOL, ...args]);
 
 // LibreOffice uses a lot of memory, so run one conversion at a time.
 let officeQueue = Promise.resolve();
@@ -77,7 +77,7 @@ function withOfficeLock(fn) {
 }
 
 let officeCalls = 0;
-async function office(input, filter, outExt, work, infilter) {
+export async function office(input, filter, outExt, work, infilter) {
   return withOfficeLock(async () => {
     const id = ++officeCalls;
     const outDir = path.join(work, `office-${id}`);

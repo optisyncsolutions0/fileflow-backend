@@ -205,12 +205,12 @@ def iter_members(src, ext, tmp):
     raise UserError(f"{ext.upper()} archives are not supported.")
 
 
-def archive(src, in_ext, out, out_fmt):
+def archive(src, in_ext, out, out_fmt, best=False):
     with tempfile.TemporaryDirectory() as tmp:
         members = iter_members(src, in_ext, tmp)
         written = 0
         if out_fmt == "zip":
-            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9 if best else None) as zf:
                 for name, f in members:
                     name = safe_name(name)
                     if name:
@@ -219,7 +219,8 @@ def archive(src, in_ext, out, out_fmt):
                         written += 1
         elif out_fmt in ("tar", "gz"):
             mode = "w:gz" if out_fmt == "gz" else "w"
-            with tarfile.open(out, mode) as tf:
+            opts = {"compresslevel": 9} if out_fmt == "gz" else {}
+            with tarfile.open(out, mode, **opts) as tf:
                 for name, f in members:
                     name = safe_name(name)
                     if not name:
@@ -244,13 +245,37 @@ def archive(src, in_ext, out, out_fmt):
                     shutil.copyfileobj(f, dst)
                 written += 1
             if written:
-                r = subprocess.run(["7z", "a", "-y", out, "."], cwd=stage, capture_output=True, text=True)
+                r = subprocess.run(["7z", "a", "-y", *(["-mx=9"] if best else []), out, "."], cwd=stage, capture_output=True, text=True)
                 if r.returncode != 0:
                     raise RuntimeError(r.stderr or r.stdout)
         else:
             raise UserError(f"Converting archives to {out_fmt.upper()} is not supported.")
         if written == 0:
             raise UserError("This archive is empty.")
+
+
+def pdfopt(src, out):
+    """Lossless PDF clean-up (used when Ghostscript is not available)."""
+    doc = open_pdf(src)
+    doc.save(out, garbage=4, deflate=True, deflate_images=True, deflate_fonts=True, clean=True)
+
+
+def bmp2png(src, out):
+    from PIL import Image
+
+    try:
+        img = Image.open(src)
+        img.load()
+    except Exception:
+        raise UserError("This BMP image is damaged or not a real image file.")
+    if img.mode not in ("RGB", "RGBA", "L", "LA", "P"):
+        img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+    img.save(out, "PNG", optimize=True)
+
+
+def zipone(src, out, name):
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        zf.write(src, safe_name(name) or "file")
 
 
 def main(argv):
@@ -266,7 +291,13 @@ def main(argv):
     elif cmd == "pdf2img":
         pdf2img(argv[2], argv[3], argv[4])
     elif cmd == "archive":
-        archive(argv[2], argv[3], argv[4], argv[5])
+        archive(argv[2], argv[3], argv[4], argv[5], len(argv) > 6 and argv[6] == "best")
+    elif cmd == "pdfopt":
+        pdfopt(argv[2], argv[3])
+    elif cmd == "bmp2png":
+        bmp2png(argv[2], argv[3])
+    elif cmd == "zipone":
+        zipone(argv[2], argv[3], argv[4])
     else:
         raise SystemExit(f"unknown command {cmd}")
 

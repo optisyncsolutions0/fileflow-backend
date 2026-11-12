@@ -9,6 +9,7 @@ import sharp from 'sharp';
 import { PDFDocument } from 'pdf-lib';
 import os from 'os';
 import { convertFile, allowedTargets, normalizeExt, UserError, DOCUMENT_INPUTS, ARCHIVE_INPUTS } from './convert.js';
+import { compressFile } from './compress.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -381,57 +382,67 @@ app.post('/api/pdf/info', upload.single('file'), async (req, res) => {
   }
 });
 
-// Compress image endpoint
+// Compress any file. Send `level` (light | balanced | strong) to get JSON
+// { noGain: true } back when the file cannot be made noticeably smaller.
+// Without `level` (old image Quick Tools), `quality` is used and a file is always returned.
+const COMPRESS_HEADERS = 'X-FileFlow-Filename, X-FileFlow-Note, X-FileFlow-Before, X-FileFlow-After';
 app.post('/api/convert/compress', upload.single('file'), async (req, res) => {
+  let work;
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
+    const level = ['light', 'balanced', 'strong'].includes(req.body.level) ? req.body.level : undefined;
+    const qualityOverride = level ? undefined : Math.min(100, Math.max(10, parseInt(req.body.quality) || 80));
 
-    const quality = parseInt(req.body.quality) || 80;
-    const format = req.body.format || getExtension(req.file.originalname);
+    let inputExt = normalizeExt(getExtension(req.file.originalname));
+    if (/\.tar\.gz$/i.test(req.file.originalname)) inputExt = 'tgz';
 
-    const inputPath = req.file.path;
-    const outputFileName = `${getBaseName(req.file.originalname)}-compressed.${format}`;
-    const outputPath = path.join(__dirname, 'uploads', `${uuidv4()}-${outputFileName}`);
-
-    let sharpInstance = sharp(inputPath);
-
-    // Apply format-specific compression
-    switch (format) {
-      case 'jpg':
-      case 'jpeg':
-        sharpInstance = sharpInstance.jpeg({ quality, mozjpeg: true });
-        break;
-      case 'png':
-        sharpInstance = sharpInstance.png({ compressionLevel: 9, adaptiveFiltering: true });
-        break;
-      case 'webp':
-        sharpInstance = sharpInstance.webp({ quality });
-        break;
-      case 'avif':
-        sharpInstance = sharpInstance.avif({ quality });
-        break;
-      default:
-        sharpInstance = sharpInstance.toFormat(format, { quality });
-    }
-
-    await sharpInstance.toFile(outputPath);
-    cleanupFile(inputPath);
-
-    res.download(outputPath, outputFileName, (err) => {
-      cleanupFile(outputPath);
-      if (err) {
-        console.error('Download error:', err);
-      }
-    });
-
-  } catch (error) {
-    console.error('Compression error:', error);
-    if (req.file) {
+    work = fs.mkdtempSync(path.join(WORK_ROOT, 'job-'));
+    fs.mkdirSync(path.join(work, 'in'));
+    const baseName = safeBaseName(req.file.originalname.replace(/\.tar\.gz$/i, '.tgz'));
+    const inputPath = path.join(work, 'in', `${baseName}${inputExt ? '.' + inputExt : ''}`);
+    try {
+      fs.renameSync(req.file.path, inputPath);
+    } catch (e) {
+      if (e.code !== 'EXDEV') throw e;
+      fs.copyFileSync(req.file.path, inputPath);
       cleanupFile(req.file.path);
     }
-    res.status(500).json({ error: 'Compression failed', details: error.message });
+
+    const started = Date.now();
+    const result = await compressFile(inputPath, inputExt, level || 'balanced', work, { qualityOverride });
+    const before = fs.statSync(inputPath).size;
+    const after = fs.statSync(result.path).size;
+    console.log(`Compressed ${inputExt || 'file'} (${level || 'quality ' + qualityOverride}) ${before} -> ${after} bytes in ${Date.now() - started}ms`);
+
+    if (level && after >= before * 0.97) {
+      fs.rm(work, { recursive: true, force: true }, () => {});
+      work = undefined;
+      return res.json({ noGain: true, before, after });
+    }
+
+    res.set({
+      'Access-Control-Expose-Headers': COMPRESS_HEADERS,
+      'X-FileFlow-Filename': encodeURIComponent(result.filename),
+      'X-FileFlow-Note': encodeURIComponent(result.note || ''),
+      'X-FileFlow-Before': String(before),
+      'X-FileFlow-After': String(after),
+    });
+    const jobDir = work;
+    work = undefined; // cleaned up after the download finishes
+    res.download(result.path, result.filename, (err) => {
+      fs.rm(jobDir, { recursive: true, force: true }, () => {});
+      if (err) console.error('Download error:', err);
+    });
+  } catch (error) {
+    if (req.file) cleanupFile(req.file.path);
+    if (work) fs.rm(work, { recursive: true, force: true }, () => {});
+    if (error instanceof UserError) {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('Compression error:', error);
+    res.status(500).json({ error: 'Compression failed. Please try again, or contact support if it keeps happening.' });
   }
 });
 

@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NODE_ENV=production
 
 # LibreOffice (Word/Excel/PowerPoint conversions), Python (PDF tools),
-# 7-Zip (7z archives) and fonts so documents render correctly
+# 7-Zip (7z archives), Ghostscript (PDF compression) and fonts so documents render correctly
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui \
       python3 python3-pip \
