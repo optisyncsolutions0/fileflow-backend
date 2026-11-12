@@ -10,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui \
       python3 python3-pip \
-      p7zip-full \
+      p7zip-full ghostscript \
       fonts-dejavu-core fonts-liberation2 fonts-crosextra-carlito fonts-crosextra-caladea \
       fonts-noto-core fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
